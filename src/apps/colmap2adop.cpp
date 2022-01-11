@@ -7,8 +7,6 @@
 #include "saiga/core/util/commandLineArguments.h"
 #include "saiga/core/util/exif/TinyEXIF.h"
 #include "saiga/core/util/file.h"
-#include "saiga/core/util/json11.hpp"
-#include "saiga/core/util/tinyxml2.h"
 #include "saiga/vision/cameraModel/OCam.h"
 #include "saiga/vision/util/ColmapReader.h"
 
@@ -39,9 +37,8 @@ std::vector<float> ExposureValuesFromImages(std::vector<std::string> files, std:
         else
         {
             double EV_log2 =
-                log2((info.FNumber * info.FNumber) / info.ExposureTime) + log2(info.ISOSpeedRatings / 100.0);
+                log2((info.FNumber * info.FNumber) / info.ExposureTime) + log2(info.ISOSpeedRatings / 100.0) - info.ExposureBiasValue;
             exposures.push_back(EV_log2);
-            SAIGA_ASSERT(info.ExposureBiasValue == 0);
         }
     }
 

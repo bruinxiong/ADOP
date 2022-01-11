@@ -25,6 +25,7 @@ NeuralScene::NeuralScene(std::shared_ptr<SceneData> scene, std::shared_ptr<Combi
     // ========== Create Modules ==========
 
     point_cloud_cuda = NeuralPointCloudCuda(scene->point_cloud);
+    SAIGA_ASSERT(point_cloud_cuda->t_normal.defined() || !params->render_params.check_normal);
 
 
     std::vector<float> exposures;
@@ -346,7 +347,7 @@ void NeuralScene::SaveCheckpoint(const std::string& checkpoint_dir, bool reduced
 }
 void NeuralScene::Log(const std::string& log_dir)
 {
-    std::cout << "Scene Log - Texture: " << std::endl;
+    std::cout << "Scene Log - Texture: ";
     PrintTensorInfo(texture->texture);
     {
         auto bg = texture->GetBackgroundColor();
@@ -379,6 +380,12 @@ void NeuralScene::Log(const std::string& log_dir)
         PrintTensorInfo(poses->poses_se3);
     }
 
+    if (!params->optimizer_params.fix_points)
+    {
+        std::cout << "Point Position: ";
+        PrintTensorInfo(point_cloud_cuda->t_position);
+    }
+
     if (camera->vignette_net && !params->optimizer_params.fix_vignette)
     {
         camera->vignette_net->PrintParams(log_dir, scene->scene_name);
@@ -388,23 +395,8 @@ void NeuralScene::OptimizerStep(int epoch_id, bool structure_only)
 {
     if (!structure_only && texture_optimizer)
     {
-        if (params->train_params.debug)
-        {
-            std::cout << std::endl;
-            std::cout << std::endl;
-            std::cout << "opt" << std::endl;
-            PrintTensorInfo(texture->texture);
-            PrintTensorInfo(texture->texture.grad());
-            SAIGA_ASSERT(texture->texture.grad().isfinite().all().item().toBool());
-        }
-
         texture_optimizer->step();
         texture_optimizer->zero_grad();
-        if (params->train_params.debug)
-        {
-            PrintTensorInfo(texture->texture.grad());
-            std::cout << std::endl;
-        }
     }
 
     if (epoch_id > params->train_params.lock_camera_params_epochs)

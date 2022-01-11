@@ -28,6 +28,8 @@ set(SAIGA_MODULE_VULKAN OFF)
 #set(SAIGA_MODULE_CUDA OFF)
 set(SAIGA_NO_INSTALL ON)
 set(SAIGA_USE_SUBMODULES ON)
+set(SAIGA_WITH_FFMPEG OFF)
+set(SAIGA_WITH_FREETYPE OFF)
 add_subdirectory(External/saiga)
 PackageHelperTarget(saiga_core SAIGA_FOUND)
 if (NOT ADOP_HEADLESS)
@@ -47,6 +49,12 @@ target_include_directories(torchvision PUBLIC
         $<INSTALL_INTERFACE:External/torchvision/>
         )
 PackageHelperTarget(torchvision TORCHVISION_FOUND)
+
+
+add_subdirectory(External/tensorboard_logger)
+#target_include_directories(tensorboard_logger PUBLIC External/tensorboard_logger/include ${CMAKE_CURRENT_BINARY_DIR}/External/tensorboard_logger)
+set_property(TARGET tensorboard_logger PROPERTY POSITION_INDEPENDENT_CODE ON)
+PackageHelperTarget(tensorboard_logger TBL_FOUND)
 
 ############# COMPILER FLAGS ###############
 

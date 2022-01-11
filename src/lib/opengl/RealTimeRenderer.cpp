@@ -82,7 +82,7 @@ void RealTimeRenderer::Forward(Camera* cam, ImageInfo fd)
     mouse_on_view = false;
     if (ImGui::Begin("Neural View"))
     {
-        ImGui::BeginChild("gt_child", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+        ImGui::BeginChild("neural_child", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
         mouse_on_view |= ImGui::IsWindowHovered();
 
 
@@ -103,7 +103,7 @@ void RealTimeRenderer::Forward(Camera* cam, ImageInfo fd)
 
     if (ImGui::Begin("Debug View"))
     {
-        ImGui::BeginChild("gt_child", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
+        ImGui::BeginChild("dbg_child", ImVec2(0, 0), false, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);
         mouse_on_view |= ImGui::IsWindowHovered();
         if (render_color)
         {
@@ -369,6 +369,7 @@ void RealTimeRenderer::imgui()
 }
 void RealTimeRenderer::Render(ImageInfo fd)
 {
+    SAIGA_ASSERT(pipeline);
     if (!pipeline) return;
 
     std::vector<NeuralTrainData> batch(1);
@@ -406,6 +407,8 @@ void RealTimeRenderer::Render(ImageInfo fd)
 
         texure_interop = std::make_shared<Saiga::CUDA::Interop>();
         texure_interop->initImage(output_texture->getId(), output_texture->getTarget());
+
+        std::cout << "Setting Neural Render Size to " << fd.w << "x" << fd.h << std::endl;
     }
 
     batch.front()->uv = use_center_tensor ? uv_tensor_center : uv_tensor;
@@ -422,7 +425,7 @@ void RealTimeRenderer::Render(ImageInfo fd)
         std::swap(ns->poses, rt_extrinsics);
 
         old_cutoff                        = params->render_params.dist_cutoff;
-        params->render_params.dist_cutoff = 100;
+        params->render_params.dist_cutoff = fd.distortion.MonotonicThreshold();
 
         batch.front()->img.camera_index      = 0;
         batch.front()->img.image_index       = 0;
@@ -541,7 +544,7 @@ void RealTimeRenderer::RenderColor(ImageInfo fd, int flags)
         std::swap(ns->poses, rt_extrinsics);
 
         old_cutoff                        = params->render_params.dist_cutoff;
-        params->render_params.dist_cutoff = 100;
+        params->render_params.dist_cutoff = fd.distortion.MonotonicThreshold();
 
         nri.images.front().camera_index      = 0;
         nri.images.front().image_index       = 0;
@@ -577,6 +580,8 @@ void RealTimeRenderer::RenderColor(ImageInfo fd, int flags)
 
         color_interop = std::make_shared<Saiga::CUDA::Interop>();
         color_interop->initImage(output_color->getId(), output_color->getTarget());
+
+        std::cout << "Setting Debug Output Size to " << x.size(1) << "x" << x.size(0) << std::endl;
     }
 
     color_interop->mapImage();
@@ -610,7 +615,14 @@ void RealTimeRenderer::LoadNets()
 
     params = std::make_shared<CombinedParams>(ex.dir + "/params.ini");
 
-    params->net_params.half_float             = true;
+    cudaDeviceProp deviceProp;
+    cudaGetDeviceProperties(&deviceProp, 0);
+    if (deviceProp.major > 6)
+    {
+        std::cout << "Using half_float inference" << std::endl;
+        params->net_params.half_float = true;
+    }
+
     params->pipeline_params.train             = false;
     params->render_params.render_outliers     = false;
     params->train_params.checkpoint_directory = ep.dir;
@@ -631,18 +643,6 @@ void RealTimeRenderer::LoadNets()
     ns = std::make_shared<NeuralScene>(scene, params);
     ns->to(device);
     ns->Train(0, false);
-
-
-    if (0)
-    {
-        auto read_poses = ns->poses->Download();
-        for (int i = 0; i < read_poses.size(); ++i)
-        {
-            std::cout << "pose error " << i << ": "
-                      << translationalError(read_poses[i].inverse(), scene->frames[i].pose) << " "
-                      << rotationalError(read_poses[i].inverse(), scene->frames[i].pose) << std::endl;
-        }
-    }
 
     rt_intrinsics = IntrinsicsModule(scene->scene_cameras.front().K);
     rt_extrinsics = PoseModule(scene->frames[0].pose);

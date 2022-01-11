@@ -5,9 +5,11 @@
  */
 
 #include "saiga/core/time/time.h"
+#include "saiga/core/util/MemoryUsage.h"
 #include "saiga/core/util/ProgressBar.h"
 #include "saiga/core/util/commandLineArguments.h"
 #include "saiga/core/util/file.h"
+#include "saiga/cuda/CudaInfo.h"
 #include "saiga/vision/torch/ImageTensor.h"
 #include "saiga/vision/torch/LRScheduler.h"
 
@@ -17,6 +19,7 @@
 #include <torch/script.h>
 
 #include "git_sha1.h"
+#include "tensorboard_logger.h"
 
 std::string full_experiment_dir;
 
@@ -118,13 +121,6 @@ class TrainScene
                                                         ".png");
                 scene_data.eval_crop_mask = (mask);
             }
-
-            std::vector<Sophus::SE3d> poses;
-            for (auto& f : scene->frames)
-            {
-                poses.push_back(f.pose);
-            }
-            scene_data.old_poses = poses;
 
             scene->AddIntrinsicsNoise(params->train_params.noise_intr_k, params->train_params.noise_intr_d);
 
@@ -272,11 +268,10 @@ class TrainScene
     struct PerSceneData
     {
         std::shared_ptr<NeuralScene> scene;
-        std::vector<Sophus::SE3d> old_poses;
         torch::Tensor eval_crop_mask;
 
         // all image indices that are not used during training.
-        // -> we interpolate the meta data for them
+        // -> we interpolate the metadata for them
         std::vector<int> not_training_indices;
 
         LossResult epoch_loss;
@@ -286,7 +281,7 @@ class TrainScene
     std::vector<SceneDataTrainSampler> train_cropped_samplers, test_samplers, test_cropped_samplers;
 };
 
-
+ImGui::IMConsole console_error;
 
 class NeuralTrainer
 {
@@ -299,20 +294,28 @@ class NeuralTrainer
     std::string ep_dir;
     LRSchedulerPlateau lr_scheduler;
 
+    std::shared_ptr<TensorBoardLogger> tblogger;
+
     ~NeuralTrainer() {}
 
     NeuralTrainer()
     {
-        lr_scheduler = LRSchedulerPlateau(params->train_params.lr_decay_factor, params->train_params.lr_decay_patience);
+        lr_scheduler = LRSchedulerPlateau(params->train_params.lr_decay_factor, params->train_params.lr_decay_patience, true);
         torch::set_num_threads(1);
 
         std::string experiment_name = Saiga::CurrentTimeString("%F_%H-%M-%S") + "_" + params->train_params.name;
         full_experiment_dir         = params->train_params.experiment_dir + "/" + experiment_name + "/";
         std::filesystem::create_directories(full_experiment_dir);
+
         console.setOutputFile(full_experiment_dir + "log.txt");
         SAIGA_ASSERT(console.rdbuf());
         std::cout.rdbuf(console.rdbuf());
 
+        console_error.setOutputFile(full_experiment_dir + "error.txt");
+        SAIGA_ASSERT(console_error.rdbuf());
+        std::cerr.rdbuf(console_error.rdbuf());
+
+        tblogger     = std::make_shared<TensorBoardLogger>((full_experiment_dir + "/tfevents.pb").c_str());
         train_scenes = std::make_shared<TrainScene>(params->train_params.scene_names);
 
         // Save all paramters into experiment output dir
@@ -342,16 +345,31 @@ class NeuralTrainer
             {
                 if (params->train_params.do_train && epoch_id > 0)
                 {
-                    auto epoch_loss = TrainEpoch(epoch_id, train_scenes->train_cropped_samplers, false);
+                    auto epoch_loss = TrainEpoch(epoch_id, train_scenes->train_cropped_samplers, false, "Train");
+                    for (auto& sd : train_scenes->data)
+                    {
+                        tblogger->add_scalar("LossTrain/" + sd.scene->scene->scene_name, epoch_id,
+                                             sd.epoch_loss.Average().loss_float);
+                        sd.epoch_loss.Average().AppendToFile(
+                            full_experiment_dir + "loss_train_" + sd.scene->scene->scene_name + ".txt", epoch_id);
+                    }
 
                     if (params->train_params.optimize_eval_camera)
                     {
-                        std::cout << "Optimizing meta info from test cameras..." << std::endl;
-                        TrainEpoch(epoch_id, train_scenes->test_cropped_samplers, true);
+                        TrainEpoch(epoch_id, train_scenes->test_cropped_samplers, true, "EvalRefine");
+                        for (auto& sd : train_scenes->data)
+                        {
+                            tblogger->add_scalar("LossEvalRefine/" + sd.scene->scene->scene_name, epoch_id,
+                                                 sd.epoch_loss.Average().loss_float);
+                            sd.epoch_loss.Average().AppendToFile(
+                                full_experiment_dir + "loss_eval_refine_" + sd.scene->scene->scene_name + ".txt",
+                                epoch_id);
+                        }
                     }
 
                     auto reduce_factor           = lr_scheduler.step(epoch_loss);
                     static double current_factor = 1;
+                    tblogger->add_scalar("LR/factor", epoch_id, current_factor);
                     current_factor *= reduce_factor;
 
                     if (reduce_factor < 1)
@@ -367,14 +385,12 @@ class NeuralTrainer
                         // s.scene->UpdateLearningRate(epoch_id, params->train_params.num_epochs);
                         s.scene->UpdateLearningRate(epoch_id, reduce_factor);
                     }
-
-                    for (auto& sd : train_scenes->data)
-                    {
-                        sd.epoch_loss.Average().AppendToFile(
-                            full_experiment_dir + "loss_train_" + sd.scene->scene->scene_name + ".txt", epoch_id);
-                    }
                 }
 
+                if (params->train_params.debug)
+                {
+                    std::cout << GetMemoryInfo() << std::endl;
+                }
                 pipeline->Log(full_experiment_dir);
                 for (auto& s : train_scenes->data)
                 {
@@ -389,8 +405,15 @@ class NeuralTrainer
 
                     for (auto& sd : train_scenes->data)
                     {
-                        sd.epoch_loss.Average().AppendToFile(
-                            full_experiment_dir + "loss_eval_" + sd.scene->scene->scene_name + ".txt", epoch_id);
+                        auto avg = sd.epoch_loss.Average();
+                        tblogger->add_scalar("LossEval/" + sd.scene->scene->scene_name + "/vgg", epoch_id,
+                                             avg.loss_vgg);
+                        tblogger->add_scalar("LossEval/" + sd.scene->scene->scene_name + "/lpips", epoch_id,
+                                             avg.loss_lpips);
+                        tblogger->add_scalar("LossEval/" + sd.scene->scene->scene_name + "/psnr", epoch_id,
+                                             avg.loss_psnr);
+                        avg.AppendToFile(full_experiment_dir + "loss_eval_" + sd.scene->scene->scene_name + ".txt",
+                                         epoch_id);
                     }
                 }
             }
@@ -416,7 +439,8 @@ class NeuralTrainer
     }
 
 
-    double TrainEpoch(int epoch_id, std::vector<SceneDataTrainSampler>& data, bool structure_only)
+
+    double TrainEpoch(int epoch_id, std::vector<SceneDataTrainSampler>& data, bool structure_only, std::string name)
     {
         train_scenes->StartEpoch();
         // Train
@@ -428,7 +452,7 @@ class NeuralTrainer
 
         {
             Saiga::ProgressBar bar(
-                std::cout, "Train " + std::to_string(epoch_id) + " |",
+                std::cout, name + " " + std::to_string(epoch_id) + " |",
                 loader_size * params->train_params.batch_size * params->train_params.inner_batch_size, 30, false, 5000);
             for (std::vector<NeuralTrainData>& batch : *loader)
             {
@@ -618,6 +642,8 @@ int main(int argc, char* argv[])
     {
         NeuralTrainer trainer;
     }
+
+    CHECK_CUDA_ERROR(cudaDeviceReset());
 
     return 0;
 }

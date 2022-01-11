@@ -9,6 +9,8 @@
 #include "saiga/core/util/commandLineArguments.h"
 #include "saiga/core/util/exif/TinyEXIF.h"
 
+#include "git_sha1.h"
+
 
 ADOPViewer::ADOPViewer(std::string scene_dir, std::unique_ptr<DeferredRenderer> renderer_,
                        std::unique_ptr<WindowType> window_)
@@ -280,17 +282,20 @@ void ADOPViewer::Recording(ImageInfo& fd)
 
         if (record_neural)
         {
+            SAIGA_ASSERT(neural_renderer);
             auto frame = neural_renderer->DownloadRender();
             frame.save(out_dir + "/neural/" + frame_name);
         }
         if (record_debug)
         {
+            SAIGA_ASSERT(neural_renderer);
             auto frame = neural_renderer->DownloadColor();
             frame.save(out_dir + "/debug/" + frame_name);
         }
 
         if (record_gt)
         {
+            SAIGA_ASSERT(neural_renderer);
             TemplatedImage<ucvec4> frame = neural_renderer->DownloadGt();
 
             if (downscale_gt)
@@ -373,6 +378,12 @@ void ADOPViewer::Recording(ImageInfo& fd)
         renderer->tone_mapper.params_dirty          = true;
 
         update_curve = true;
+    }
+
+    if (ImGui::Button("preset kemenate"))
+    {
+        ::camera->position = vec4(7.79858, 1.07699, -0.849739, 1);
+        ::camera->rot      = quat( 0.731483, -0.00347084, 0.68185, 0.00113975);
     }
 
 
@@ -504,6 +515,7 @@ void ADOPViewer::Recording(ImageInfo& fd)
 
     if (!is_recording && ImGui::Button("start recording"))
     {
+        SAIGA_ASSERT(neural_renderer);
         neural_renderer->current_best_gt = -1;
         is_recording                     = true;
         traj                             = camera_spline.Trajectory();
@@ -556,6 +568,8 @@ void ADOPViewer::Recording(ImageInfo& fd)
 
 int main(int argc, char* argv[])
 {
+    std::cout << "Git ref: " << GIT_SHA1 << std::endl;
+
     float render_scale = 1.0f;
     std::string scene_dir;
     CLI::App app{"ADOP Viewer for Scenes", "adop_viewer"};
